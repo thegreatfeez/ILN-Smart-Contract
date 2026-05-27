@@ -690,6 +690,22 @@ impl InvoiceLiquidityContract {
 
         let distribute_amount = invoice.amount - protocol_fee;
 
+        // Legacy compatibility: use first LP for event emission
+        let primary_lp = funders.get(0).unwrap().0.clone();
+
+        // Total amount funded by primary LP
+        let primary_lp_funded = funders.get(0).unwrap().1;
+
+        // LP payout after settlement distribution
+        let primary_lp_payout =
+            distribute_amount
+                .checked_mul(primary_lp_funded)
+                .unwrap_or(0)
+                / invoice.amount;
+
+        // LP earnings
+        let lp_earned = primary_lp_payout - primary_lp_funded;
+
         // Distribute proportionally to funders
         for i in 0..funders.len() {
             let (funder_addr, fund_amt) = funders.get(i).unwrap();
@@ -717,12 +733,13 @@ impl InvoiceLiquidityContract {
         env.events().publish_event(&InvoicePaid {
             invoice_id: invoice.id,
             payer: invoice.payer.clone(),
-            funder: funders.get(0).unwrap().0.clone(), // legacy event compatibility
+            lp: primary_lp,
             freelancer: invoice.freelancer.clone(),
             token: invoice.token.clone(),
-            amount: invoice.amount,
-            discount_amount: invoice.amount - distribute_amount, // emit fee taken as discount_amount for legacy compatibility
-            due_date: invoice.due_date,
+            amount_paid: invoice.amount,
+            lp_earned,
+            lp_payout: primary_lp_payout,
+            settlement_timestamp: env.ledger().timestamp(),
             paid_on_time,
             status: invoice.status.clone(),
         });
@@ -1025,3 +1042,5 @@ mod tests_protocol_fee;
 mod tests_security;
 mod tests_state_machine;
 mod tests_storage;
+#[cfg(test)]
+mod tests_invoice_paid_event;

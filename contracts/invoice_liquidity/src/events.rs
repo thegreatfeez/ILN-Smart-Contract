@@ -61,14 +61,28 @@ pub struct InvoiceFunded {
 pub struct InvoicePaid {
     #[topic]
     pub invoice_id: u64,
+
     #[topic]
     pub payer: Address,
-    pub funder: Address,
+
+    #[topic]
+    pub lp: Address,
+
     pub freelancer: Address,
     pub token: Address,
-    pub amount: i128,
-    pub discount_amount: i128,
-    pub due_date: u64,
+
+    /// Full amount settled by payer
+    pub amount_paid: i128,
+
+    /// LP earnings = amount_paid - amount_funded
+    pub lp_earned: i128,
+
+    /// Total amount distributed to LP
+    pub lp_payout: i128,
+
+    /// Settlement ledger timestamp
+    pub settlement_timestamp: u64,
+
     pub paid_on_time: bool,
     pub status: InvoiceStatus,
 }
