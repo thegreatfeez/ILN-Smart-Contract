@@ -154,7 +154,7 @@ pub fn invoice_exists(env: &Env, id: u64) -> bool {
     env.storage().persistent().has(&StorageKey::Invoice(id))
 }
 
-pub fn next_invoice_id(env: &Env) -> u64 {
+pub fn next_invoice_id(env: pub fn next_invoice_id(env: &Env) -> u64Env) -> Result<u64, crate::ContractError> {
     let current: u64 = env
         .storage()
         .persistent()
