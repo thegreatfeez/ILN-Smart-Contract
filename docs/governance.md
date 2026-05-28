@@ -95,9 +95,12 @@ from the ledger timestamp at the moment `create_proposal` is invoked.
 
 ### Double-vote prevention
 
-A `HasVoted(proposal_id, voter_address)` key is stored in persistent storage
-when a vote is cast.  Attempting to vote again on the same proposal panics with
-`"already voted"`.
+A `HasVoted(proposal_id, voter_address)` key is stored in Soroban temporary
+storage when a vote is cast. The receipt is only needed through the proposal's
+3-day voting window, so it is extended to 69,120 ledgers: approximately 4 days
+at 5 seconds per ledger. This covers the full voting period plus a 1-day buffer
+for boundary reads and indexers while allowing automatic expiry. Attempting to
+vote again while the receipt is live returns `AlreadyVoted`.
 
 ---
 

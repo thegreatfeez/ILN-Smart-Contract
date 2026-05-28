@@ -5,7 +5,10 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    testutils::{
+        storage::{Persistent, Temporary},
+        Address as _, Ledger,
+    },
     token::{Client as TokenClient, StellarAssetClient},
     Address, BytesN, Env,
 };
@@ -230,6 +233,46 @@ fn test_has_voted_returns_true_after_vote() {
     t.contract.cast_vote(&t.voter_a, &id, &true).unwrap();
 
     assert!(t.contract.has_voted(&t.voter_a, &id));
+}
+
+#[test]
+fn test_vote_receipt_uses_temporary_storage_with_ttl() {
+    let t = setup();
+    let id = create_fee_proposal(&t);
+    let key = StorageKey::HasVoted(id, t.voter_a.clone());
+
+    t.contract.cast_vote(&t.voter_a, &id, &true).unwrap();
+
+    let (temporary_has_receipt, persistent_has_receipt, ttl) =
+        t.env.as_contract(&t.contract.address, || {
+            (
+                t.env.storage().temporary().has(&key),
+                t.env.storage().persistent().has(&key),
+                t.env.storage().temporary().get_ttl(&key),
+            )
+        });
+
+    assert!(temporary_has_receipt);
+    assert!(!persistent_has_receipt);
+    assert!(ttl >= VOTE_RECEIPT_TTL_THRESHOLD_LEDGERS);
+}
+
+#[test]
+fn test_vote_receipt_available_within_ttl() {
+    let t = setup();
+    let id = create_fee_proposal(&t);
+
+    t.contract.cast_vote(&t.voter_a, &id, &true).unwrap();
+
+    let mut ledger = t.env.ledger().get();
+    ledger.sequence_number += VOTE_RECEIPT_TTL_THRESHOLD_LEDGERS - 1;
+    ledger.timestamp += 1;
+    t.env.ledger().set(ledger);
+
+    assert!(t.contract.has_voted(&t.voter_a, &id));
+
+    let result = t.contract.cast_vote(&t.voter_a, &id, &false);
+    assert_eq!(result, Err(Ok(GovernanceError::AlreadyVoted)));
 }
 
 // ── Issue #61: Anti-double-vote protection ────────────────────────────────────

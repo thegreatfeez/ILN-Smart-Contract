@@ -9,6 +9,15 @@ use soroban_sdk::{
     token::Client as TokenClient, vec, Address, BytesN, Env, IntoVal, Symbol, Vec,
 };
 
+/// Vote receipts only need to outlive the active voting window.
+///
+/// The proposal window is 3 days. At the Stellar target ledger cadence of
+/// roughly 5 seconds, that is about 51,840 ledgers; the extra 1-day buffer keeps
+/// receipts available for clients/indexers near the boundary while still
+/// allowing Soroban to auto-expire the temporary entry.
+const VOTE_RECEIPT_TTL_THRESHOLD_LEDGERS: u32 = 50_000;
+const VOTE_RECEIPT_TTL_LEDGERS: u32 = 69_120;
+
 // ================================================================
 // Issue #59: Governance error enum
 // ================================================================
@@ -243,7 +252,7 @@ impl GovContract {
 
         // ── Issue #61: Anti-double-vote protection ────────────────
         let voted_key = StorageKey::HasVoted(proposal_id, voter.clone());
-        if env.storage().persistent().has(&voted_key) {
+        if env.storage().temporary().has(&voted_key) {
             return Err(GovernanceError::AlreadyVoted);
         }
 
@@ -265,7 +274,12 @@ impl GovContract {
         }
 
         // Record that this voter has voted (prevents double-voting).
-        env.storage().persistent().set(&voted_key, &true);
+        env.storage().temporary().set(&voted_key, &true);
+        env.storage().temporary().extend_ttl(
+            &voted_key,
+            VOTE_RECEIPT_TTL_THRESHOLD_LEDGERS,
+            VOTE_RECEIPT_TTL_LEDGERS,
+        );
         env.storage()
             .persistent()
             .set(&StorageKey::Proposal(proposal_id), &proposal);
@@ -384,7 +398,7 @@ impl GovContract {
     /// Return whether a specific address has already voted on a proposal.
     pub fn has_voted(env: Env, voter: Address, proposal_id: u64) -> bool {
         env.storage()
-            .persistent()
+            .temporary()
             .has(&StorageKey::HasVoted(proposal_id, voter))
     }
 }

@@ -6,6 +6,8 @@ pub mod invoice;
 pub mod storage;
 pub mod config;
 pub mod rate_logic;
+pub mod access;
+use access::*;
 mod tests_regression;
 mod tests_new_features;
 
@@ -54,6 +56,7 @@ impl InvoiceLiquidityContract {
     // ------------------------------------------------------------
     // initialize (multi-token aware)
     // ------------------------------------------------------------
+    /// Access: Anyone
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -92,42 +95,51 @@ impl InvoiceLiquidityContract {
     }
 
     // ------------------------------------------------------------
-    pub fn set_admin(env: Env, new_admin: Address) {
-        let old_admin: Address = env.storage().instance().get(&crate::storage::DataKey::Admin).unwrap();
-        old_admin.require_auth();
-        env.storage().instance().set(&crate::storage::DataKey::Admin, &new_admin);
+    /// Access: Admin only
+    pub fn set_admin(env: Env, new_admin: Address) -> Result<(), ContractError> {
+        require_admin(&env)?;
+        let old_admin: Address = env.storage().instance().get(&StorageKey::Admin).unwrap();
+        env.storage().instance().set(&StorageKey::Admin, &new_admin);
         env.events().publish_event(&AdminChanged {
             old_admin,
             new_admin,
             timestamp: env.ledger().timestamp(),
         });
+        Ok(())
     }
 
-    pub fn update_fee_rate(env: Env, rate: u32) {
-        let admin: Address = env.storage().instance().get(&crate::storage::DataKey::Admin).unwrap();
-        admin.require_auth();
-        env.storage().instance().set(&crate::storage::DataKey::FeeRate, &rate);
+    /// Access: Admin only
+    pub fn update_fee_rate(env: Env, rate: u32) -> Result<(), ContractError> {
+        require_admin(&env)?;
+
+        env.storage().instance().set(&StorageKey::FeeRate, &rate);
+        Ok(())
     }
 
-    pub fn update_max_discount(env: Env, rate: u32) {
-        let admin: Address = env.storage().instance().get(&crate::storage::DataKey::Admin).unwrap();
-        admin.require_auth();
+    /// Access: Admin only
+    pub fn update_max_discount(env: Env, rate: u32) -> Result<(), ContractError> {
+        require_admin(&env)?;
+
         env.storage()
             .instance()
-            .set(&crate::storage::DataKey::MaxDiscountRate, &rate);
+            .set(&StorageKey::MaxDiscountRate, &rate);
+        Ok(())
     }
 
-    pub fn set_distribution_contract(env: Env, distribution_contract: Address) {
-        let admin: Address = env.storage().instance().get(&crate::storage::DataKey::Admin).unwrap();
-        admin.require_auth();
+    /// Access: Admin only
+    pub fn set_distribution_contract(env: Env, distribution_contract: Address) -> Result<(), ContractError> {
+        require_admin(&env)?;
+
         env.storage()
             .instance()
-            .set(&crate::storage::DataKey::DistributionContract, &distribution_contract);
+            .set(&StorageKey::DistributionContract, &distribution_contract);
+        Ok(())
     }
 
-    pub fn add_token(env: Env, token: Address) {
-        let admin: Address = env.storage().instance().get(&crate::storage::DataKey::Admin).unwrap();
-        admin.require_auth();
+    /// Access: Admin only
+    pub fn add_token(env: Env, token: Address) -> Result<(), ContractError> {
+        require_admin(&env)?;
+
         env.storage()
             .persistent()
             .set(&crate::storage::DataKey::ApprovedToken(token.clone()), &true);
@@ -143,22 +155,26 @@ impl InvoiceLiquidityContract {
                 .persistent()
                 .set(&crate::storage::DataKey::TokenList, &list);
         }
+        Ok(())
     }
 
-    pub fn remove_token(env: Env, token: Address) {
-        let admin: Address = env.storage().instance().get(&crate::storage::DataKey::Admin).unwrap();
-        admin.require_auth();
+    /// Access: Admin only
+    pub fn remove_token(env: Env, token: Address) -> Result<(), ContractError> {
+        require_admin(&env)?;
+
         env.storage()
             .persistent()
-            .set(&crate::storage::DataKey::ApprovedToken(token.clone()), &false);
+            .set(&StorageKey::ApprovedToken(token.clone()), &false);
+        Ok(())
     }
 
     // ------------------------------------------------------------
     // pause / unpause (emergency controls)
     // ------------------------------------------------------------
+    /// Access: Admin only
     pub fn pause(env: Env) -> Result<(), ContractError> {
-        let admin: Address = env.storage().instance().get(&crate::storage::DataKey::Admin).unwrap();
-        admin.require_auth();
+        require_admin(&env)?;
+
         set_paused(&env, true);
         env.events().publish_event(&ContractPaused {
             timestamp: env.ledger().timestamp(),
@@ -166,9 +182,10 @@ impl InvoiceLiquidityContract {
         Ok(())
     }
 
+    /// Access: Admin only
     pub fn unpause(env: Env) -> Result<(), ContractError> {
-        let admin: Address = env.storage().instance().get(&crate::storage::DataKey::Admin).unwrap();
-        admin.require_auth();
+        require_admin(&env)?;
+
         set_paused(&env, false);
         env.events().publish_event(&ContractUnpaused {
             timestamp: env.ledger().timestamp(),
@@ -179,6 +196,7 @@ impl InvoiceLiquidityContract {
     // ------------------------------------------------------------
     // get_contract_stats (read-only view)
     // ------------------------------------------------------------
+    /// Access: Anyone
     pub fn get_contract_stats(env: Env) -> ContractStats {
         get_contract_stats(&env)
     }
@@ -186,6 +204,7 @@ impl InvoiceLiquidityContract {
     // ------------------------------------------------------------
     // submit_invoice (NOW TOKEN-AWARE)
     // ------------------------------------------------------------
+    /// Access: Submitter only
     pub fn submit_invoice(
         env: Env,
         freelancer: Address,
@@ -199,7 +218,7 @@ impl InvoiceLiquidityContract {
             return Err(ContractError::ContractPaused);
         }
 
-        freelancer.require_auth();
+        require_submitter(&env, &freelancer)?;
 
         if freelancer == payer {
             return Err(ContractError::SelfInvoice);
@@ -251,6 +270,7 @@ impl InvoiceLiquidityContract {
     // ------------------------------------------------------------
     // update_invoice
     // ------------------------------------------------------------
+    /// Access: Submitter only
     pub fn update_invoice(
         env: Env,
         freelancer: Address,
@@ -268,11 +288,7 @@ impl InvoiceLiquidityContract {
         }
 
         let mut invoice = load_invoice(&env, invoice_id);
-        freelancer.require_auth();
-
-        if invoice.freelancer != freelancer {
-            return Err(ContractError::Unauthorized);
-        }
+        require_submitter_by_id(&env, &freelancer, invoice_id)?;
 
         if invoice.status == InvoiceStatus::Pending && env.ledger().timestamp() >= invoice.due_date
         {
@@ -318,6 +334,7 @@ impl InvoiceLiquidityContract {
     // ------------------------------------------------------------
     // submit_invoices_batch
     // ------------------------------------------------------------
+    /// Access: Submitter only
     pub fn submit_invoices_batch(
         env: Env,
         invoices: Vec<InvoiceParams>,
@@ -334,7 +351,7 @@ impl InvoiceLiquidityContract {
         let mut ids = Vec::new(&env);
         for params in invoices.iter() {
             if !authenticated_freelancers.contains(&params.freelancer) {
-                params.freelancer.require_auth();
+                require_submitter(&env, &params.freelancer)?;
                 authenticated_freelancers.push_back(params.freelancer.clone());
             }
 
@@ -399,12 +416,13 @@ impl InvoiceLiquidityContract {
 
     /// Register an LP's intent to fund an invoice.
     /// The LP's current reputation score is snapshotted for ordering.
+    /// Access: LP only
     pub fn join_fund_queue(
         env: Env,
         lp: Address,
         invoice_id: u64,
     ) -> Result<(), ContractError> {
-        lp.require_auth();
+        require_lp(&env, &lp)?;
 
         if !invoice_exists(&env, invoice_id) {
             return Err(ContractError::InvoiceNotFound);
@@ -447,6 +465,7 @@ impl InvoiceLiquidityContract {
     /// Select the highest-reputation LP from the queue as the approved funder.
     /// Returns the winning LP address.
     /// Can be called by anyone once at least one LP has joined the queue.
+    /// Access: Anyone
     pub fn resolve_fund_queue(
         env: Env,
         invoice_id: u64,
@@ -491,6 +510,7 @@ impl InvoiceLiquidityContract {
     // ------------------------------------------------------------
     // fund_invoice (USES invoice.token) — now queue-aware
     // ------------------------------------------------------------
+    /// Access: LP only
     pub fn fund_invoice(
         env: Env,
         funder: Address,
@@ -501,7 +521,7 @@ impl InvoiceLiquidityContract {
             return Err(ContractError::ContractPaused);
         }
 
-        funder.require_auth();
+        require_lp(&env, &funder)?;
 
         if !invoice_exists(&env, invoice_id) {
             return Err(ContractError::InvoiceNotFound);
@@ -663,6 +683,7 @@ impl InvoiceLiquidityContract {
     // ------------------------------------------------------------
     // transfer_invoice
     // ------------------------------------------------------------
+    /// Access: Submitter only
     pub fn transfer_invoice(
         env: Env,
         invoice_id: u64,
@@ -678,7 +699,7 @@ impl InvoiceLiquidityContract {
 
         let mut invoice = load_invoice(&env, invoice_id);
 
-        invoice.freelancer.require_auth();
+        require_submitter_by_id(&env, &invoice.freelancer, invoice_id)?;
 
         match invoice.status {
             InvoiceStatus::Pending => {}
@@ -710,6 +731,7 @@ impl InvoiceLiquidityContract {
     // ------------------------------------------------------------
     // cancel_invoice
     // ------------------------------------------------------------
+    /// Access: Submitter only
     pub fn cancel_invoice(env: Env, invoice_id: u64) -> Result<(), ContractError> {
         if is_paused(&env) {
             return Err(ContractError::ContractPaused);
@@ -721,7 +743,7 @@ impl InvoiceLiquidityContract {
 
         let mut invoice = load_invoice(&env, invoice_id);
 
-        invoice.freelancer.require_auth();
+        require_submitter_by_id(&env, &invoice.freelancer, invoice_id)?;
 
         match invoice.status {
             InvoiceStatus::Pending => {}
@@ -763,6 +785,7 @@ impl InvoiceLiquidityContract {
     // ------------------------------------------------------------
     // expire_invoice
     // ------------------------------------------------------------
+    /// Access: Anyone
     pub fn expire_invoice(env: Env, invoice_id: u64) -> Result<(), ContractError> {
         if !invoice_exists(&env, invoice_id) {
             return Err(ContractError::InvoiceNotFound);
@@ -794,6 +817,7 @@ impl InvoiceLiquidityContract {
     // ------------------------------------------------------------
     // mark_paid (USES invoice.token)
     // ------------------------------------------------------------
+    /// Access: Payer only
     pub fn mark_paid(env: Env, invoice_id: u64) -> Result<(), ContractError> {
         if is_paused(&env) {
             return Err(ContractError::ContractPaused);
@@ -805,7 +829,7 @@ impl InvoiceLiquidityContract {
 
         let mut invoice = load_invoice(&env, invoice_id);
 
-        invoice.payer.require_auth();
+        require_payer_by_id(&env, invoice_id)?;
 
         match invoice.status {
             InvoiceStatus::Pending | InvoiceStatus::PartiallyFunded => {
@@ -912,6 +936,7 @@ impl InvoiceLiquidityContract {
     // ----------------------------------------------------------------
     // claim_yield
     // ----------------------------------------------------------------
+    /// Access: LP only
     pub fn claim_yield(env: Env, invoice_id: u64) -> Result<i128, ContractError> {
         if !invoice_exists(&env, invoice_id) {
             return Err(ContractError::InvoiceNotFound);
@@ -921,7 +946,7 @@ impl InvoiceLiquidityContract {
 
         // Only the funder can query their own yield
         if let Some(ref funder) = invoice.funder {
-            funder.require_auth();
+            require_lp_by_id(&env, funder, invoice_id)?;
         } else {
             return Err(ContractError::NothingToClaim);
         }
@@ -948,12 +973,13 @@ impl InvoiceLiquidityContract {
     // ----------------------------------------------------------------
     // claim_default
     // ----------------------------------------------------------------
+    /// Access: LP only
     pub fn claim_default(env: Env, funder: Address, invoice_id: u64) -> Result<(), ContractError> {
         if is_paused(&env) {
             return Err(ContractError::ContractPaused);
         }
 
-        funder.require_auth();
+        require_lp(&env, &funder)?;
 
         if !invoice_exists(&env, invoice_id) {
             return Err(ContractError::InvoiceNotFound);
@@ -1053,6 +1079,7 @@ impl InvoiceLiquidityContract {
     ///
     /// * `invoice_id`    – the defaulted invoice
     /// * `evidence_hash` – SHA-256 hash of off-chain evidence provided by the payer
+    /// Access: Payer only
     pub fn appeal_default(
         env: Env,
         invoice_id: u64,
@@ -1065,7 +1092,7 @@ impl InvoiceLiquidityContract {
         let mut invoice = load_invoice(&env, invoice_id);
 
         // Only the payer may appeal.
-        invoice.payer.require_auth();
+        require_payer_by_id(&env, invoice_id)?;
 
         // Check AlreadyAppealed BEFORE status check: after the first appeal the
         // status is `Appealed` (not `Defaulted`), so the status guard would fire
@@ -1121,13 +1148,13 @@ impl InvoiceLiquidityContract {
     ///   In practice the status transitions back to Defaulted with score restored so the LP
     ///   can still collect principal they were already refunded. The key effect is reputation repair.
     /// * `upheld=false` → reject the appeal; invoice remains Defaulted (status reverts from Appealed).
+    /// Access: Admin only
     pub fn resolve_appeal(
         env: Env,
         invoice_id: u64,
         upheld: bool,
     ) -> Result<(), ContractError> {
-        let admin: Address = env.storage().instance().get(&crate::storage::DataKey::Admin).unwrap();
-        admin.require_auth();
+
 
         if !invoice_exists(&env, invoice_id) {
             return Err(ContractError::InvoiceNotFound);
@@ -1169,6 +1196,7 @@ impl InvoiceLiquidityContract {
     // ----------------------------------------------------------------
     // payer_score
     // ----------------------------------------------------------------
+    /// Access: Anyone
     pub fn payer_score(env: Env, payer: Address) -> u32 {
         get_payer_score(&env, &payer)
     }
@@ -1176,6 +1204,7 @@ impl InvoiceLiquidityContract {
     // ----------------------------------------------------------------
     // lp_score  (Issue #34)
     // ----------------------------------------------------------------
+    /// Access: Anyone
     pub fn lp_score(env: Env, lp: Address) -> u32 {
         get_lp_score(&env, &lp)
     }
@@ -1183,6 +1212,7 @@ impl InvoiceLiquidityContract {
     // ----------------------------------------------------------------
     // suggested_discount_rate
     // ----------------------------------------------------------------
+    /// Access: Anyone
     pub fn suggested_discount_rate(env: Env, payer: Address) -> u32 {
         let score = get_payer_score(&env, &payer);
         let capped = score.min(100);
@@ -1202,6 +1232,7 @@ impl InvoiceLiquidityContract {
     // ----------------------------------------------------------------
     // get_invoice
     // ----------------------------------------------------------------
+    /// Access: Anyone
     pub fn get_invoice(env: Env, invoice_id: u64) -> Result<Invoice, ContractError> {
         if !invoice_exists(&env, invoice_id) {
             return Err(ContractError::InvoiceNotFound);
@@ -1209,6 +1240,7 @@ impl InvoiceLiquidityContract {
         Ok(load_invoice(&env, invoice_id))
     }
 
+    /// Access: Anyone
     pub fn get_invoice_count(env: Env) -> u64 {
         env.storage()
             .persistent()
@@ -1329,6 +1361,5 @@ mod tests_storage;
 #[cfg(test)]
 mod tests_invoice_paid_event;
 #[cfg(test)]
-mod tests_lp_funding_details_event;
-#[cfg(test)]
+mod tests_lp_funding_details_event;#[cfg(test)]
 mod tests_access_control;
