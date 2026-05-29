@@ -265,6 +265,7 @@ fn test_auto_resolve_dispute_timeout_behavior() {
         decay_rate_bps: 100,
         decay_period_ledgers: 1000,
         dispute_timeout_ledgers: 100,
+        price_oracle: None,
     };
     t.env.as_contract(&t.contract.address, || {
         crate::storage::set_config(&t.env, &config);

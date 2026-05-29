@@ -8,10 +8,12 @@
 //! - Config storage of XLM SAC address
 //! - Volume tracking for XLM
 
-use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{Address, Env};
+#![cfg(test)]
 
-use invoice_liquidity::{ContractError, InvoiceLiquidityContractClient, InvoiceStatus};
+use super::*;
+use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
+use soroban_sdk::testutils::Address as _;
+use soroban_sdk::{Address, Env};
 
 const XLM_DECIMALS: u32 = 7; // 1 XLM = 10,000,000 stroops
 const USDC_DECIMALS: u32 = 6; // 1 USDC = 1,000,000 units
@@ -30,7 +32,7 @@ fn setup_xlm_env() -> (
     Address,
     Address,
     Address,
-    InvoiceLiquidityContractClient,
+    InvoiceLiquidityContractClient<'static>,
 ) {
     let env = Env::default();
     env.mock_all_auths();
@@ -49,7 +51,7 @@ fn setup_xlm_env() -> (
     let xlm_address = xlm_contract_id.address();
 
     // Deploy invoice liquidity contract
-    let contract_id = env.register_contract(None, invoice_liquidity::InvoiceLiquidityContract);
+    let contract_id = env.register(InvoiceLiquidityContract, ());
     let client = InvoiceLiquidityContractClient::new(&env, &contract_id);
 
     // Initialize contract with USDC and XLM

@@ -8,6 +8,7 @@
     [],
     [],
     [],
+    [],
     [
       [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
@@ -24,13 +25,13 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                 },
                 {
-                  "i128": "10000"
+                  "i128": "1000"
                 },
                 {
-                  "u64": "1700000000"
+                  "u64": "1800000000"
                 },
                 {
-                  "u32": 400
+                  "u32": 500
                 }
               ]
             }
@@ -39,6 +40,8 @@
         }
       ]
     ],
+    [],
+    [],
     [
       [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
@@ -58,6 +61,8 @@
         }
       ]
     ],
+    [],
+    [],
     [
       [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
@@ -74,13 +79,13 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                 },
                 {
-                  "i128": "10000"
+                  "i128": "1000"
                 },
                 {
-                  "u64": "1700000000"
+                  "u64": "1800000000"
                 },
                 {
-                  "u32": 400
+                  "u32": 500
                 }
               ]
             }
@@ -88,7 +93,10 @@
           "sub_invocations": []
         }
       ]
-    ]
+    ],
+    [],
+    [],
+    []
   ],
   "ledger": {
     "protocol_version": 25,
@@ -125,7 +133,7 @@
                       "symbol": "amount"
                     },
                     "val": {
-                      "i128": "10000"
+                      "i128": "1000"
                     }
                   },
                   {
@@ -133,7 +141,7 @@
                       "symbol": "base_discount_rate_bps"
                     },
                     "val": {
-                      "u32": 400
+                      "u32": 500
                     }
                   },
                   {
@@ -141,7 +149,7 @@
                       "symbol": "due_date"
                     },
                     "val": {
-                      "u64": "1700000000"
+                      "u64": "1800000000"
                     }
                   },
                   {
@@ -149,7 +157,7 @@
                       "symbol": "effective_discount_rate_bps"
                     },
                     "val": {
-                      "u32": 400
+                      "u32": 500
                     }
                   },
                   {
@@ -221,7 +229,7 @@
                       "symbol": "amount"
                     },
                     "val": {
-                      "i128": "10000"
+                      "i128": "1000"
                     }
                   },
                   {
@@ -229,7 +237,7 @@
                       "symbol": "base_discount_rate_bps"
                     },
                     "val": {
-                      "u32": 400
+                      "u32": 500
                     }
                   },
                   {
@@ -237,7 +245,7 @@
                       "symbol": "due_date"
                     },
                     "val": {
-                      "u64": "1700000000"
+                      "u64": "1800000000"
                     }
                   },
                   {
@@ -245,7 +253,7 @@
                       "symbol": "effective_discount_rate_bps"
                     },
                     "val": {
-                      "u32": 250
+                      "u32": 300
                     }
                   },
                   {
@@ -279,7 +287,7 @@
                     "val": {
                       "vec": [
                         {
-                          "symbol": "Pending"
+                          "symbol": "Defaulted"
                         }
                       ]
                     }
@@ -317,7 +325,7 @@
                       "symbol": "invoices_defaulted"
                     },
                     "val": {
-                      "u32": 0
+                      "u32": 1
                     }
                   },
                   {
@@ -377,7 +385,7 @@
                       "symbol": "invoices_defaulted"
                     },
                     "val": {
-                      "u32": 0
+                      "u32": 1
                     }
                   },
                   {
@@ -454,7 +462,7 @@
                               "symbol": "bonus_bps"
                             },
                             "val": {
-                              "u32": 150
+                              "u32": 200
                             }
                           },
                           {
@@ -470,7 +478,7 @@
                               "symbol": "min_discount_rate_bps"
                             },
                             "val": {
-                              "u32": 50
+                              "u32": 100
                             }
                           }
                         ]
@@ -573,78 +581,5 @@
       }
     ]
   },
-  "events": [
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
-        "type_": "contract",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "REP_UPD"
-              },
-              {
-                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-              }
-            ],
-            "data": {
-              "vec": [
-                {
-                  "u32": 2
-                },
-                {
-                  "u32": 1
-                },
-                {
-                  "u32": 0
-                },
-                {
-                  "u32": 50
-                }
-              ]
-            }
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
-        "type_": "contract",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "REP_UPD"
-              },
-              {
-                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
-              }
-            ],
-            "data": {
-              "vec": [
-                {
-                  "u32": 2
-                },
-                {
-                  "u32": 1
-                },
-                {
-                  "u32": 0
-                },
-                {
-                  "u32": 50
-                }
-              ]
-            }
-          }
-        }
-      },
-      "failed_call": false
-    }
-  ]
+  "events": []
 }

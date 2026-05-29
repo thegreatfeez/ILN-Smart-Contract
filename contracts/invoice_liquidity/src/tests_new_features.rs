@@ -7,6 +7,8 @@
 
 use super::*;
 use soroban_sdk::{
+    contract,
+    contractimpl,
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
     Address, Env,
@@ -179,6 +181,50 @@ fn test_contract_stats_multiple_invoices() {
     assert_eq!(stats.total_invoices, 3);
     assert_eq!(stats.total_funded, 0);
     assert_eq!(stats.total_paid, 0);
+}
+
+#[contract]
+struct MockPriceOracle;
+
+#[contractimpl]
+impl MockPriceOracle {
+    pub fn get_price(_env: Env, _token: Address) -> i128 {
+        20_000
+    }
+}
+
+#[test]
+fn test_contract_stats_tracks_token_volumes_and_oracle_normalization() {
+    let t = setup();
+
+    let due_date = t.env.ledger().timestamp() + DUE_DATE_OFFSET;
+    let invoice_id = t.contract.submit_invoice(
+        &t.freelancer,
+        &t.payer,
+        &INVOICE_AMOUNT,
+        &due_date,
+        &DISCOUNT_RATE,
+        &t.token.address,
+    );
+
+    t.contract
+        .fund_invoice(&t.funder, &invoice_id, &INVOICE_AMOUNT);
+    t.contract.mark_paid(&invoice_id, &INVOICE_AMOUNT);
+
+    let stats = t.contract.get_contract_stats();
+    assert_eq!(stats.total_volume_usdc, INVOICE_AMOUNT);
+    assert_eq!(stats.token_volumes.len(), 2);
+
+    let volume_entry = stats.token_volumes.get(0).unwrap();
+    assert_eq!(volume_entry.0, t.token.address);
+    assert_eq!(volume_entry.1, INVOICE_AMOUNT);
+    assert_eq!(stats.total_volume_usd_normalized, 0);
+
+    let oracle_id = t.env.register(MockPriceOracle, ());
+    t.contract.set_price_oracle(&oracle_id.address());
+
+    let stats = t.contract.get_contract_stats();
+    assert_eq!(stats.total_volume_usd_normalized, INVOICE_AMOUNT * 20_000 / 10_000);
 }
 
 // ================================================================

@@ -41,5 +41,6 @@ pub enum ContractError {
     DueDateTooFar = 28,
     SelfInvoice = 29,
     OverpaymentRejected = 30,
-    ArithmeticOverflow = 31,
+    /// Issue #28: payer's reputation is below the configured minimum threshold.
+    PayerReputationTooLow = 31,
 }

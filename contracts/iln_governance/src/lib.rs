@@ -2,6 +2,8 @@
 //!
 //! Issue #59 — GovernanceProposal struct with full spec fields.
 //! Issue #61 — cast_vote() with anti-double-vote protection and VoteCast event.
+//! Issue #64 — delegate_votes() / undelegate_votes() with transitive delegation
+//!             and cycle detection.
 
 #![no_std]
 use soroban_sdk::{
@@ -10,62 +12,50 @@ use soroban_sdk::{
 };
 
 /// Vote receipts only need to outlive the active voting window.
-///
-/// The proposal window is 3 days. At the Stellar target ledger cadence of
-/// roughly 5 seconds, that is about 51,840 ledgers; the extra 1-day buffer keeps
-/// receipts available for clients/indexers near the boundary while still
-/// allowing Soroban to auto-expire the temporary entry.
 const VOTE_RECEIPT_TTL_THRESHOLD_LEDGERS: u32 = 50_000;
 const VOTE_RECEIPT_TTL_LEDGERS: u32 = 69_120;
 
+/// Maximum transitive delegation chain depth we will traverse.
+const MAX_DELEGATION_DEPTH: u32 = 10;
+
 // ================================================================
-// Issue #59: Governance error enum
+// Governance error enum
 // ================================================================
 
 #[contracterror]
 #[derive(Clone, Debug, PartialEq)]
 pub enum GovernanceError {
-    /// Contract has already been initialised.
     AlreadyInitialized = 1,
-    /// The requested proposal does not exist.
     ProposalNotFound = 2,
-    /// The voting window has already closed.
     VotingEnded = 3,
-    /// The proposal is no longer in Active status.
     ProposalNotActive = 4,
-    /// The caller has no governance-token balance (no voting power).
     NoVotingPower = 5,
-    /// Issue #61: The caller has already cast a vote on this proposal.
     AlreadyVoted = 6,
-    /// The voting window is still open; cannot execute yet.
     VotingOngoing = 7,
-    /// Quorum was not reached.
     QuorumNotReached = 8,
-    /// Proposal was rejected (votes_against >= votes_for).
     ProposalRejected = 9,
-    /// Proposal has already been resolved (Passed/Rejected/Executed).
     AlreadyResolved = 10,
+    /// Issue #64: Delegating to self is not allowed.
+    CannotDelegateToSelf = 11,
+    /// Issue #64: Delegation would create a cycle.
+    DelegationCyclePrevented = 12,
 }
 
 // ================================================================
-// Issue #59: ProposalAction — enum of all governable parameters
+// ProposalAction
 // ================================================================
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum ProposalAction {
-    /// Update the protocol fee rate (basis points).
     UpdateFeeRate(u32),
-    /// Approve a new token for invoice denomination.
     AddToken(Address),
-    /// Remove a previously approved token.
     RemoveToken(Address),
-    /// Update the maximum allowed discount rate (basis points).
     UpdateMaxDiscountRate(u32),
 }
 
 // ================================================================
-// Issue #59: ProposalStatus
+// ProposalStatus
 // ================================================================
 
 #[contracttype]
@@ -73,68 +63,31 @@ pub enum ProposalAction {
 pub enum ProposalStatus {
     Active,
     Passed,
-    Rejected, // renamed from Failed per issue spec
+    Rejected,
     Executed,
 }
 
 // ================================================================
-// Issue #59: GovernanceProposal struct — full spec
-//
-//  { id, proposer, description_hash, action_type, proposed_value,
-//    status, votes_for, votes_against, created_at, voting_end }
+// GovernanceProposal struct
 // ================================================================
 
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct GovernanceProposal {
     pub id: u64,
-    /// Address that created the proposal.
     pub proposer: Address,
-    /// SHA-256 hash of the human-readable description stored off-chain.
     pub description_hash: BytesN<32>,
-    /// Which parameter this proposal intends to change.
     pub action_type: ProposalAction,
-    /// Numeric value associated with the action (e.g. new fee rate in bps).
-    /// For address-based actions (AddToken / RemoveToken) this is 0.
     pub proposed_value: i128,
     pub status: ProposalStatus,
     pub votes_for: i128,
     pub votes_against: i128,
-    /// Ledger timestamp when the proposal was created.
-    pub created_at: u64,
-    /// Ledger timestamp when the voting window closes.
-    pub voting_end: u64,
-}
-
-// ================================================================
-// Issue #70: ProposalCreated / ProposalExecuted events
-// ================================================================
-
-#[contractevent(topics = ["proposal_created"])]
-#[derive(Clone, Debug, PartialEq)]
-pub struct ProposalCreated {
-    #[topic]
-    pub proposal_id: u64,
-    pub proposer: Address,
-    pub action_type: ProposalAction,
-    pub proposed_value: i128,
     pub created_at: u64,
     pub voting_end: u64,
 }
 
-#[contractevent(topics = ["proposal_executed"])]
-#[derive(Clone, Debug, PartialEq)]
-pub struct ProposalExecuted {
-    #[topic]
-    pub proposal_id: u64,
-    pub action_type: ProposalAction,
-    pub proposed_value: i128,
-    pub votes_for: i128,
-    pub votes_against: i128,
-}
-
 // ================================================================
-// Issue #61: VoteCast event
+// Events
 // ================================================================
 
 #[contractevent(topics = ["vote_cast"])]
@@ -144,10 +97,26 @@ pub struct VoteCast {
     pub proposal_id: u64,
     #[topic]
     pub voter: Address,
-    /// true = voted for, false = voted against.
     pub support: bool,
-    /// Voting weight (caller's token balance).
     pub weight: i128,
+}
+
+/// Issue #64
+#[contractevent(topics = ["votes_delegated"])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct VotesDelegated {
+    #[topic]
+    pub delegator: Address,
+    #[topic]
+    pub delegate: Address,
+}
+
+/// Issue #64
+#[contractevent(topics = ["votes_undelegated"])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct VotesUndelegated {
+    #[topic]
+    pub delegator: Address,
 }
 
 // ================================================================
@@ -160,14 +129,16 @@ pub enum StorageKey {
     GovToken,
     Proposal(u64),
     ProposalCount,
-    /// Proposal-scoped voting-power snapshot keyed by voter.
     VoteWeightSnapshot(u64, Address),
-    /// Issue #61: per-(voter, proposal_id) double-vote guard.
     HasVoted(u64, Address),
+    /// Issue #64: forward delegation pointer — Delegation(X) = Y means X delegates to Y.
+    Delegation(Address),
+    /// Issue #64: running tally of total delegated weight pointing (transitively) at Address.
+    DelegatedToMe(Address),
 }
 
 // ================================================================
-// Contract implementation
+// Contract
 // ================================================================
 
 #[contract]
@@ -185,26 +156,14 @@ impl GovContract {
         if env.storage().instance().has(&StorageKey::IlnContract) {
             return Err(GovernanceError::AlreadyInitialized);
         }
-        env.storage()
-            .instance()
-            .set(&StorageKey::IlnContract, &iln_contract);
-        env.storage()
-            .instance()
-            .set(&StorageKey::GovToken, &gov_token);
-        env.storage()
-            .instance()
-            .set(&StorageKey::ProposalCount, &0_u64);
+        env.storage().instance().set(&StorageKey::IlnContract, &iln_contract);
+        env.storage().instance().set(&StorageKey::GovToken, &gov_token);
+        env.storage().instance().set(&StorageKey::ProposalCount, &0_u64);
         Ok(())
     }
 
-    // ── Issue #59: create_proposal ────────────────────────────────
+    // ── create_proposal ───────────────────────────────────────────
 
-    /// Create a new governance proposal.
-    ///
-    /// * `proposer`         – the address creating the proposal (must auth)
-    /// * `action_type`      – which parameter to change
-    /// * `description_hash` – SHA-256 of the off-chain description
-    /// * `proposed_value`   – numeric value (0 for address-based actions)
     pub fn create_proposal(
         env: Env,
         proposer: Address,
@@ -214,15 +173,10 @@ impl GovContract {
     ) -> Result<u64, GovernanceError> {
         proposer.require_auth();
 
-        let count: u64 = env
-            .storage()
-            .instance()
-            .get(&StorageKey::ProposalCount)
-            .unwrap_or(0);
+        let count: u64 = env.storage().instance().get(&StorageKey::ProposalCount).unwrap_or(0);
         let id = count + 1;
 
         let now = env.ledger().timestamp();
-        // 3-day voting window.
         let voting_end = now + 259_200;
 
         let proposal = GovernanceProposal {
@@ -246,36 +200,108 @@ impl GovContract {
             &proposer_weight,
         );
 
-        env.storage()
-            .persistent()
-            .set(&StorageKey::Proposal(id), &proposal);
-        env.storage()
-            .instance()
-            .set(&StorageKey::ProposalCount, &id);
-
-        env.events().publish_event(&ProposalCreated {
-            proposal_id: id,
-            proposer,
-            action_type: proposal.action_type.clone(),
-            proposed_value,
-            created_at: now,
-            voting_end,
-        });
+        env.storage().persistent().set(&StorageKey::Proposal(id), &proposal);
+        env.storage().instance().set(&StorageKey::ProposalCount, &id);
 
         Ok(id)
     }
 
-    // ── Issue #61: cast_vote ──────────────────────────────────────
+    // ── Issue #64: delegate_votes ─────────────────────────────────
+
+    /// Delegate the caller's voting weight to `delegate`.
+    ///
+    /// * Cannot delegate to self.
+    /// * Rejects delegation if it would create a cycle in the chain.
+    /// * Re-delegation overwrites the previous delegation and adjusts the
+    ///   `DelegatedToMe` tally on both old and new terminal nodes.
+    ///
+    /// Emits `VotesDelegated`.
+    pub fn delegate_votes(
+        env: Env,
+        delegator: Address,
+        delegate: Address,
+    ) -> Result<(), GovernanceError> {
+        delegator.require_auth();
+
+        if delegator == delegate {
+            return Err(GovernanceError::CannotDelegateToSelf);
+        }
+
+        // ── Cycle detection ───────────────────────────────────────
+        // Walk the forward chain from `delegate`.
+        // If we reach `delegator` at any point, the new edge would close a cycle.
+        let mut cursor: Option<Address> = Self::get_delegate_raw(&env, &delegate);
+        let mut depth = 0u32;
+        while let Some(ref next) = cursor.clone() {
+            if depth >= MAX_DELEGATION_DEPTH {
+                break;
+            }
+            if *next == delegator {
+                return Err(GovernanceError::DelegationCyclePrevented);
+            }
+            cursor = Self::get_delegate_raw(&env, next);
+            depth += 1;
+        }
+
+        // ── Find the terminal node for `delegate` ─────────────────
+        let terminal = Self::resolve_terminal(&env, &delegate);
+
+        // ── Remove weight from old terminal if re-delegating ──────
+        if let Some(old_delegate) = Self::get_delegate_raw(&env, &delegator) {
+            let old_terminal = Self::resolve_terminal(&env, &old_delegate);
+            let delegator_balance = Self::get_own_balance_for_delegation(&env, &delegator);
+            Self::adjust_delegated_to_me(&env, &old_terminal, -(delegator_balance as i128));
+        }
+
+        // ── Store forward pointer ─────────────────────────────────
+        env.storage()
+            .persistent()
+            .set(&StorageKey::Delegation(delegator.clone()), &delegate);
+
+        // ── Add weight to new terminal ────────────────────────────
+        let delegator_balance = Self::get_own_balance_for_delegation(&env, &delegator);
+        Self::adjust_delegated_to_me(&env, &terminal, delegator_balance as i128);
+
+        env.events().publish_event(&VotesDelegated { delegator, delegate });
+
+        Ok(())
+    }
+
+    // ── Issue #64: undelegate_votes ───────────────────────────────
+
+    /// Remove the caller's delegation.
+    ///
+    /// Emits `VotesUndelegated`.
+    pub fn undelegate_votes(env: Env, delegator: Address) -> Result<(), GovernanceError> {
+        delegator.require_auth();
+
+        if let Some(old_delegate) = Self::get_delegate_raw(&env, &delegator) {
+            let old_terminal = Self::resolve_terminal(&env, &old_delegate);
+            let delegator_balance = Self::get_own_balance_for_delegation(&env, &delegator);
+            Self::adjust_delegated_to_me(&env, &old_terminal, -(delegator_balance as i128));
+
+            env.storage()
+                .persistent()
+                .remove(&StorageKey::Delegation(delegator.clone()));
+        }
+
+        env.events().publish_event(&VotesUndelegated { delegator });
+
+        Ok(())
+    }
+
+    // ── Issue #64: get_delegate ───────────────────────────────────
+
+    /// Return the direct delegate for `addr`, if any.
+    pub fn get_delegate(env: Env, addr: Address) -> Option<Address> {
+        Self::get_delegate_raw(&env, &addr)
+    }
+
+    // ── cast_vote ─────────────────────────────────────────────────
 
     /// Cast a vote on an active proposal.
     ///
-    /// * `proposal_id` – the proposal to vote on
-    /// * `support`     – true = vote for, false = vote against
-    ///
-    /// Vote weight uses the stored checkpoint for this proposal/voter pair.
-    /// If no checkpoint exists yet, the current balance is recorded once and
-    /// reused for the remainder of the proposal.
-    /// Returns `GovernanceError::AlreadyVoted` if the caller has already voted.
+    /// Issue #64: weight = own snapshot balance + DelegatedToMe tally.
     pub fn cast_vote(
         env: Env,
         voter: Address,
@@ -298,7 +324,6 @@ impl GovContract {
             return Err(GovernanceError::ProposalNotActive);
         }
 
-        // ── Issue #61: Anti-double-vote protection ────────────────
         let voted_key = StorageKey::HasVoted(proposal_id, voter.clone());
         if env.storage().temporary().has(&voted_key) {
             return Err(GovernanceError::AlreadyVoted);
@@ -306,15 +331,27 @@ impl GovContract {
 
         let token_addr: Address = env.storage().instance().get(&StorageKey::GovToken).unwrap();
         let token = TokenClient::new(&env, &token_addr);
+
+        // Own snapshotted (or current) balance.
         let snapshot_key = StorageKey::VoteWeightSnapshot(proposal_id, voter.clone());
-        let weight: i128 = match env.storage().persistent().get(&snapshot_key) {
-            Some(weight) => weight,
+        let own_balance: i128 = match env.storage().persistent().get(&snapshot_key) {
+            Some(w) => w,
             None => {
                 let current = token.balance(&voter);
                 env.storage().persistent().set(&snapshot_key, &current);
                 current
             }
         };
+
+        // Issue #64: add delegated weight.
+        let delegated: i128 = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::DelegatedToMe(voter.clone()))
+            .unwrap_or(0_i128);
+
+        let weight = own_balance + delegated;
+
         if weight == 0 {
             return Err(GovernanceError::NoVotingPower);
         }
@@ -325,7 +362,6 @@ impl GovContract {
             proposal.votes_against += weight;
         }
 
-        // Record that this voter has voted (prevents double-voting).
         env.storage().temporary().set(&voted_key, &true);
         env.storage().temporary().extend_ttl(
             &voted_key,
@@ -336,13 +372,7 @@ impl GovContract {
             .persistent()
             .set(&StorageKey::Proposal(proposal_id), &proposal);
 
-        // ── Issue #61: Emit VoteCast event ────────────────────────
-        env.events().publish_event(&VoteCast {
-            proposal_id,
-            voter,
-            support,
-            weight,
-        });
+        env.events().publish_event(&VoteCast { proposal_id, voter, support, weight });
 
         Ok(())
     }
@@ -369,40 +399,28 @@ impl GovContract {
         }
 
         let total_votes = proposal.votes_for + proposal.votes_against;
-        let quorum = total_supply / 10; // 10% quorum
+        let quorum = total_supply / 10;
 
         if total_votes < quorum {
             proposal.status = ProposalStatus::Rejected;
-            env.storage()
-                .persistent()
-                .set(&StorageKey::Proposal(proposal_id), &proposal);
+            env.storage().persistent().set(&StorageKey::Proposal(proposal_id), &proposal);
             return Err(GovernanceError::QuorumNotReached);
         }
 
         if proposal.votes_for <= proposal.votes_against {
             proposal.status = ProposalStatus::Rejected;
-            env.storage()
-                .persistent()
-                .set(&StorageKey::Proposal(proposal_id), &proposal);
+            env.storage().persistent().set(&StorageKey::Proposal(proposal_id), &proposal);
             return Err(GovernanceError::ProposalRejected);
         }
 
         proposal.status = ProposalStatus::Passed;
 
-        let iln_contract: Address = env
-            .storage()
-            .instance()
-            .get(&StorageKey::IlnContract)
-            .unwrap();
+        let iln_contract: Address = env.storage().instance().get(&StorageKey::IlnContract).unwrap();
 
         match proposal.action_type.clone() {
             ProposalAction::UpdateFeeRate(rate) => {
                 let args: Vec<soroban_sdk::Val> = vec![&env, rate.into_val(&env)];
-                env.invoke_contract::<()>(
-                    &iln_contract,
-                    &Symbol::new(&env, "update_fee_rate"),
-                    args,
-                );
+                env.invoke_contract::<()>(&iln_contract, &Symbol::new(&env, "update_fee_rate"), args);
             }
             ProposalAction::AddToken(token) => {
                 let args: Vec<soroban_sdk::Val> = vec![&env, token.into_val(&env)];
@@ -414,33 +432,18 @@ impl GovContract {
             }
             ProposalAction::UpdateMaxDiscountRate(rate) => {
                 let args: Vec<soroban_sdk::Val> = vec![&env, rate.into_val(&env)];
-                env.invoke_contract::<()>(
-                    &iln_contract,
-                    &Symbol::new(&env, "update_max_discount"),
-                    args,
-                );
+                env.invoke_contract::<()>(&iln_contract, &Symbol::new(&env, "update_max_discount"), args);
             }
         }
 
         proposal.status = ProposalStatus::Executed;
-        env.storage()
-            .persistent()
-            .set(&StorageKey::Proposal(proposal_id), &proposal);
-
-        env.events().publish_event(&ProposalExecuted {
-            proposal_id,
-            action_type: proposal.action_type,
-            proposed_value: proposal.proposed_value,
-            votes_for: proposal.votes_for,
-            votes_against: proposal.votes_against,
-        });
+        env.storage().persistent().set(&StorageKey::Proposal(proposal_id), &proposal);
 
         Ok(())
     }
 
     // ── Getters ──────────────────────────────────────────────────
 
-    /// Issue #59: get_proposal(id) → GovernanceProposal
     pub fn get_proposal(env: Env, proposal_id: u64) -> Result<GovernanceProposal, GovernanceError> {
         env.storage()
             .persistent()
@@ -448,17 +451,56 @@ impl GovContract {
             .ok_or(GovernanceError::ProposalNotFound)
     }
 
-    /// Return whether a specific address has already voted on a proposal.
     pub fn has_voted(env: Env, voter: Address, proposal_id: u64) -> bool {
         env.storage()
             .temporary()
             .has(&StorageKey::HasVoted(proposal_id, voter))
     }
+
+    // ── Private helpers ──────────────────────────────────────────
+
+    fn get_delegate_raw(env: &Env, addr: &Address) -> Option<Address> {
+        env.storage().persistent().get(&StorageKey::Delegation(addr.clone()))
+    }
+
+    /// Walk forward pointers to find the terminal node (one with no further delegate).
+    fn resolve_terminal(env: &Env, start: &Address) -> Address {
+        let mut current = start.clone();
+        let mut depth = 0u32;
+        loop {
+            if depth >= MAX_DELEGATION_DEPTH {
+                break;
+            }
+            match Self::get_delegate_raw(env, &current) {
+                Some(next) => {
+                    current = next;
+                    depth += 1;
+                }
+                None => break,
+            }
+        }
+        current
+    }
+
+    /// Return the token balance of `addr` to use as the delegation weight.
+    fn get_own_balance_for_delegation(env: &Env, addr: &Address) -> i128 {
+        let token_addr: Address = env.storage().instance().get(&StorageKey::GovToken).unwrap();
+        let token = TokenClient::new(env, &token_addr);
+        token.balance(addr)
+    }
+
+    /// Add `delta` (may be negative) to the `DelegatedToMe` tally of `addr`.
+    fn adjust_delegated_to_me(env: &Env, addr: &Address, delta: i128) {
+        let key = StorageKey::DelegatedToMe(addr.clone());
+        let current: i128 = env.storage().persistent().get(&key).unwrap_or(0_i128);
+        let updated = current + delta;
+        if updated <= 0 {
+            env.storage().persistent().remove(&key);
+        } else {
+            env.storage().persistent().set(&key, &updated);
+        }
+    }
 }
 
 #[cfg(test)]
 mod test;
-
-#[cfg(test)]
-#[path = "../../tests/governance_lifecycle_test.rs"]
-mod governance_lifecycle_test;

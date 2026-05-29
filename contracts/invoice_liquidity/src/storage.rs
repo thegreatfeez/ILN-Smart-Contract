@@ -1,7 +1,7 @@
 use soroban_sdk::{contracttype, Address, Env};
 
 use crate::config::Config;
-use crate::invoice::{AppealRecord, ContractStats, Invoice, LpFundRequest, ReputationScore};
+use crate::invoice::{AppealRecord, Invoice, LpFundRequest, ReputationScore};
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -13,7 +13,8 @@ pub enum DataKey {
     MaxDiscountRate,
     DistributionContract,
     Paused,
-    NextInvoiceId,
+    /// Minimum payer reputation required to fund an invoice (Issue #28). Default 0.
+    MinPayerReputation,
 
     // Persistent Storage
     Invoice(u64),
@@ -23,6 +24,8 @@ pub enum DataKey {
     InvoiceFunders(u64),
     ApprovedToken(Address),
     TokenList,
+    /// Detailed reputation profile per address (Issue #26).
+    Reputation(Address),
     Appeal(u64),
     PreDefaultPayerScore(u64),
     LpScore(Address),
@@ -36,6 +39,10 @@ pub enum DataKey {
     TotalVolumeUsdc,
     TotalVolumeEurc,
     TotalVolumeXlm,
+    TokenVolume(Address),
+    Dispute(u64),
+    SubmitterInvoices(Address),
+    LpInvoices(Address),
 }
 
 // ----------------------------------------------------------------
@@ -254,40 +261,7 @@ pub fn get_pre_default_payer_score(env: &Env, invoice_id: u64) -> Option<u32> {
 // Contract Stats Helpers
 // ----------------------------------------------------------------
 
-pub fn get_contract_stats(env: &Env) -> ContractStats {
-    ContractStats {
-        total_invoices: env
-            .storage()
-            .persistent()
-            .get(&DataKey::TotalInvoices)
-            .unwrap_or(0),
-        total_funded: env
-            .storage()
-            .persistent()
-            .get(&DataKey::TotalFunded)
-            .unwrap_or(0),
-        total_paid: env
-            .storage()
-            .persistent()
-            .get(&DataKey::TotalPaid)
-            .unwrap_or(0),
-        total_volume_usdc: env
-            .storage()
-            .persistent()
-            .get(&DataKey::TotalVolumeUsdc)
-            .unwrap_or(0),
-        total_volume_eurc: env
-            .storage()
-            .persistent()
-            .get(&DataKey::TotalVolumeEurc)
-            .unwrap_or(0),
-        total_volume_xlm: env
-            .storage()
-            .persistent()
-            .get(&DataKey::TotalVolumeXlm)
-            .unwrap_or(0),
-    }
-}
+
 
 pub fn increment_total_invoices(env: &Env) {
     let current: u64 = env

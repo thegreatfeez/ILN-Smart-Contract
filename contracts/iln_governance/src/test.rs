@@ -1,11 +1,15 @@
-//! Tests for Issue #59 (GovernanceProposal struct) and
-//!           Issue #61 (cast_vote with anti-double-vote protection)
+//! Tests for Issue #59 (GovernanceProposal struct),
+//!           Issue #61 (cast_vote with anti-double-vote protection and VoteCast event),
+//!       and Issue #64 (delegate_votes / undelegate_votes with transitive delegation).
 
 #![cfg(test)]
 
 use super::*;
 use soroban_sdk::{
-    testutils::{storage::Temporary, Address as _, Events, Ledger},
+    testutils::{
+        storage::Temporary,
+        Address as _, Events, Ledger,
+    },
     token::{Client as TokenClient, StellarAssetClient},
     Address, BytesN, Env,
 };
@@ -26,7 +30,6 @@ fn setup() -> GovTestEnv {
     let env = Env::default();
     env.mock_all_auths();
 
-    // Deploy a mock governance token.
     let token_admin = Address::generate(&env);
     let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
     let token_addr = token_id.address();
@@ -38,13 +41,10 @@ fn setup() -> GovTestEnv {
     let voter_b = Address::generate(&env);
     let proposer = Address::generate(&env);
 
-    // Mint governance tokens.
     gov_token_admin.mint(&voter_a, &1_000);
     gov_token_admin.mint(&voter_b, &2_000);
     gov_token_admin.mint(&proposer, &500);
 
-    // Use a random address as the ILN contract stub (cross-contract calls are
-    // not exercised in unit tests).
     let iln_contract = Address::generate(&env);
 
     let contract_id = env.register(GovContract, ());
@@ -56,15 +56,7 @@ fn setup() -> GovTestEnv {
     ledger.timestamp = 1_700_000_000;
     env.ledger().set(ledger);
 
-    GovTestEnv {
-        env,
-        contract,
-        gov_token,
-        gov_token_admin,
-        voter_a,
-        voter_b,
-        proposer,
-    }
+    GovTestEnv { env, contract, gov_token, gov_token_admin, voter_a, voter_b, proposer }
 }
 
 fn dummy_hash(env: &Env) -> BytesN<32> {
@@ -80,7 +72,7 @@ fn create_fee_proposal(t: &GovTestEnv) -> u64 {
     )
 }
 
-// ── Issue #59: GovernanceProposal struct & storage ────────────────────────────
+// ── Issue #59 ─────────────────────────────────────────────────────────────────
 
 #[test]
 fn test_create_proposal_stores_correct_fields() {
@@ -163,21 +155,18 @@ fn test_double_initialize_rejected() {
     let t = setup();
     let iln = Address::generate(&t.env);
     let token = Address::generate(&t.env);
-
     t.contract.initialize(&iln, &token);
 }
 
-// ── Issue #61: cast_vote ──────────────────────────────────────────────────────
+// ── Issue #61 ─────────────────────────────────────────────────────────────────
 
 #[test]
 fn test_cast_vote_for_updates_votes_for() {
     let t = setup();
     let id = create_fee_proposal(&t);
-
     t.contract.cast_vote(&t.voter_a, &id, &true);
-
     let p = t.contract.get_proposal(&id);
-    assert_eq!(p.votes_for, 1_000); // voter_a holds 1_000 tokens
+    assert_eq!(p.votes_for, 1_000);
     assert_eq!(p.votes_against, 0);
 }
 
@@ -185,9 +174,7 @@ fn test_cast_vote_for_updates_votes_for() {
 fn test_cast_vote_against_updates_votes_against() {
     let t = setup();
     let id = create_fee_proposal(&t);
-
     t.contract.cast_vote(&t.voter_a, &id, &false);
-
     let p = t.contract.get_proposal(&id);
     assert_eq!(p.votes_against, 1_000);
     assert_eq!(p.votes_for, 0);
@@ -199,9 +186,11 @@ fn test_proposal_creation_snapshots_proposer_balance() {
     let id = create_fee_proposal(&t);
 
     let snapshot_key = StorageKey::VoteWeightSnapshot(id, t.proposer.clone());
-    let snapshot: i128 = t.env.as_contract(&t.contract.address, || {
-        t.env.storage().persistent().get(&snapshot_key).unwrap()
-    });
+    let snapshot: i128 = t
+        .env
+        .as_contract(&t.contract.address, || {
+            t.env.storage().persistent().get(&snapshot_key).unwrap()
+        });
 
     assert_eq!(snapshot, t.gov_token.balance(&t.proposer));
 }
@@ -230,11 +219,8 @@ fn test_cast_vote_uses_snapshotted_balance_after_balance_increase() {
 fn test_cast_vote_weight_equals_token_balance() {
     let t = setup();
     let id = create_fee_proposal(&t);
-
     t.contract.cast_vote(&t.voter_b, &id, &true);
-
     let p = t.contract.get_proposal(&id);
-    // voter_b holds 2_000 tokens.
     assert_eq!(p.votes_for, 2_000);
 }
 
@@ -242,23 +228,18 @@ fn test_cast_vote_weight_equals_token_balance() {
 fn test_multiple_voters_accumulate_correctly() {
     let t = setup();
     let id = create_fee_proposal(&t);
-
     t.contract.cast_vote(&t.voter_a, &id, &true);
     t.contract.cast_vote(&t.voter_b, &id, &true);
-
     let p = t.contract.get_proposal(&id);
-    assert_eq!(p.votes_for, 3_000); // 1_000 + 2_000
+    assert_eq!(p.votes_for, 3_000);
 }
 
 #[test]
 fn test_has_voted_returns_true_after_vote() {
     let t = setup();
     let id = create_fee_proposal(&t);
-
     assert!(!t.contract.has_voted(&t.voter_a, &id));
-
     t.contract.cast_vote(&t.voter_a, &id, &true);
-
     assert!(t.contract.has_voted(&t.voter_a, &id));
 }
 
@@ -288,7 +269,6 @@ fn test_vote_receipt_uses_temporary_storage_with_ttl() {
 fn test_vote_receipt_available_within_ttl() {
     let t = setup();
     let id = create_fee_proposal(&t);
-
     t.contract.cast_vote(&t.voter_a, &id, &true);
 
     let mut ledger = t.env.ledger().get();
@@ -299,14 +279,11 @@ fn test_vote_receipt_available_within_ttl() {
     assert!(t.contract.has_voted(&t.voter_a, &id));
 }
 
-// ── Issue #61: Anti-double-vote protection ────────────────────────────────────
-
 #[test]
 #[should_panic]
 fn test_double_vote_rejected_with_already_voted_error() {
     let t = setup();
     let id = create_fee_proposal(&t);
-
     t.contract.cast_vote(&t.voter_a, &id, &true);
     t.contract.cast_vote(&t.voter_a, &id, &false);
 }
@@ -315,11 +292,8 @@ fn test_double_vote_rejected_with_already_voted_error() {
 fn test_double_vote_does_not_change_vote_counts() {
     let t = setup();
     let id = create_fee_proposal(&t);
-
     t.contract.cast_vote(&t.voter_a, &id, &true);
-
     let p = t.contract.get_proposal(&id);
-    // votes_against should still be 0.
     assert_eq!(p.votes_against, 0);
     assert_eq!(p.votes_for, 1_000);
 }
@@ -328,7 +302,6 @@ fn test_double_vote_does_not_change_vote_counts() {
 #[should_panic]
 fn test_vote_on_nonexistent_proposal_rejected() {
     let t = setup();
-
     t.contract.cast_vote(&t.voter_a, &9999, &true);
 }
 
@@ -337,12 +310,9 @@ fn test_vote_on_nonexistent_proposal_rejected() {
 fn test_vote_after_voting_window_rejected() {
     let t = setup();
     let id = create_fee_proposal(&t);
-
-    // Advance time past the 3-day voting window.
     let mut ledger = t.env.ledger().get();
     ledger.timestamp += 259_201;
     t.env.ledger().set(ledger);
-
     t.contract.cast_vote(&t.voter_a, &id, &true);
 }
 
@@ -351,39 +321,24 @@ fn test_vote_after_voting_window_rejected() {
 fn test_voter_with_zero_balance_rejected() {
     let t = setup();
     let id = create_fee_proposal(&t);
-
     let zero_voter = Address::generate(&t.env);
-    // zero_voter has no tokens minted.
-
     t.contract.cast_vote(&zero_voter, &id, &true);
 }
-
-// ── Issue #61: VoteCast event ─────────────────────────────────────────────────
 
 #[test]
 fn test_cast_vote_emits_vote_cast_event() {
     let t = setup();
     let id = create_fee_proposal(&t);
-
     t.contract.cast_vote(&t.voter_a, &id, &true);
-
-    // Verify the VoteCast event was emitted by checking the contract emitted events.
     let events = t.env.events().all().filter_by_contract(&t.contract.address);
-    // At least one event must have been emitted.
-    assert!(
-        !events.events().is_empty(),
-        "VoteCast event should be emitted"
-    );
+    assert!(!events.events().is_empty(), "VoteCast event should be emitted");
 }
-
-// ── execute_proposal integration ─────────────────────────────────────────────
 
 #[test]
 #[should_panic]
 fn test_execute_before_voting_ends_fails() {
     let t = setup();
     let id = create_fee_proposal(&t);
-
     t.contract.cast_vote(&t.voter_a, &id, &true);
     t.contract.execute_proposal(&id, &10_000);
 }
@@ -393,15 +348,10 @@ fn test_execute_before_voting_ends_fails() {
 fn test_execute_quorum_not_reached_rejected() {
     let t = setup();
     let id = create_fee_proposal(&t);
-
     t.contract.cast_vote(&t.voter_a, &id, &true);
-
-    // Advance past voting window.
     let mut ledger = t.env.ledger().get();
     ledger.timestamp += 259_201;
     t.env.ledger().set(ledger);
-
-    // Total supply = 100_000; quorum = 10_000; voter_a voted 1_000 — below quorum.
     t.contract.execute_proposal(&id, &100_000);
 }
 
@@ -410,16 +360,11 @@ fn test_execute_quorum_not_reached_rejected() {
 fn test_proposal_rejected_when_against_wins() {
     let t = setup();
     let id = create_fee_proposal(&t);
-
-    // voter_a (1_000 for) vs voter_b (2_000 against).
     t.contract.cast_vote(&t.voter_a, &id, &true);
     t.contract.cast_vote(&t.voter_b, &id, &false);
-
     let mut ledger = t.env.ledger().get();
     ledger.timestamp += 259_201;
     t.env.ledger().set(ledger);
-
-    // Total supply = 3_000 to meet quorum easily.
     t.contract.execute_proposal(&id, &3_000);
 }
 
@@ -428,13 +373,148 @@ fn test_proposal_rejected_when_against_wins() {
 fn test_already_resolved_proposal_cannot_be_executed_again() {
     let t = setup();
     let id = create_fee_proposal(&t);
-
     t.contract.cast_vote(&t.voter_a, &id, &true);
-
     let mut ledger = t.env.ledger().get();
     ledger.timestamp += 259_201;
     t.env.ledger().set(ledger);
+    t.contract.execute_proposal(&id, &100_000);
+    t.contract.execute_proposal(&id, &100_000);
+}
 
-    t.contract.execute_proposal(&id, &100_000);
-    t.contract.execute_proposal(&id, &100_000);
+// ── Issue #64: delegate_votes / undelegate_votes ──────────────────────────────
+
+#[test]
+fn test_delegation_increases_delegate_vote_weight() {
+    let t = setup();
+    t.contract.delegate_votes(&t.voter_a, &t.voter_b);
+    let id = create_fee_proposal(&t);
+    t.contract.cast_vote(&t.voter_b, &id, &true);
+    let p = t.contract.get_proposal(&id);
+    // voter_b own 2_000 + voter_a delegated 1_000 = 3_000
+    assert_eq!(p.votes_for, 3_000);
+}
+
+#[test]
+fn test_undelegation_removes_delegated_weight() {
+    let t = setup();
+    t.contract.delegate_votes(&t.voter_a, &t.voter_b);
+    t.contract.undelegate_votes(&t.voter_a);
+    let id = create_fee_proposal(&t);
+    t.contract.cast_vote(&t.voter_b, &id, &true);
+    let p = t.contract.get_proposal(&id);
+    assert_eq!(p.votes_for, 2_000); // only voter_b's own tokens
+}
+
+#[test]
+fn test_get_delegate_returns_correct_address() {
+    let t = setup();
+    t.contract.delegate_votes(&t.voter_a, &t.voter_b);
+    let delegate = t.contract.get_delegate(&t.voter_a);
+    assert_eq!(delegate, Some(t.voter_b.clone()));
+}
+
+#[test]
+fn test_get_delegate_returns_none_after_undelegation() {
+    let t = setup();
+    t.contract.delegate_votes(&t.voter_a, &t.voter_b);
+    t.contract.undelegate_votes(&t.voter_a);
+    let delegate = t.contract.get_delegate(&t.voter_a);
+    assert_eq!(delegate, None);
+}
+
+#[test]
+fn test_transitive_delegation_a_to_b_to_c() {
+    let t = setup();
+    let voter_c = Address::generate(&t.env);
+    t.gov_token_admin.mint(&voter_c, &3_000);
+
+    // B → C first, then A → B
+    t.contract.delegate_votes(&t.voter_b, &voter_c);
+    t.contract.delegate_votes(&t.voter_a, &t.voter_b);
+
+    let id = create_fee_proposal(&t);
+    t.contract.cast_vote(&voter_c, &id, &true);
+
+    let p = t.contract.get_proposal(&id);
+    // C own 3_000 + B delegated 2_000 + A delegated 1_000 = 6_000
+    assert_eq!(p.votes_for, 6_000);
+}
+
+#[test]
+#[should_panic]
+fn test_cycle_prevention_direct_a_b_b_a() {
+    let t = setup();
+    t.contract.delegate_votes(&t.voter_a, &t.voter_b);
+    t.contract.delegate_votes(&t.voter_b, &t.voter_a); // must panic
+}
+
+#[test]
+#[should_panic]
+fn test_delegate_to_self_rejected() {
+    let t = setup();
+    t.contract.delegate_votes(&t.voter_a, &t.voter_a);
+}
+
+#[test]
+#[should_panic]
+fn test_cycle_prevention_indirect_a_b_c_a() {
+    let t = setup();
+    let voter_c = Address::generate(&t.env);
+    t.gov_token_admin.mint(&voter_c, &500);
+
+    t.contract.delegate_votes(&t.voter_a, &t.voter_b);
+    t.contract.delegate_votes(&t.voter_b, &voter_c);
+    t.contract.delegate_votes(&voter_c, &t.voter_a); // must panic
+}
+
+#[test]
+fn test_redelegation_moves_weight_to_new_delegate() {
+    let t = setup();
+    let voter_c = Address::generate(&t.env);
+    t.gov_token_admin.mint(&voter_c, &500);
+
+    t.contract.delegate_votes(&t.voter_a, &t.voter_b); // A → B
+    t.contract.delegate_votes(&t.voter_a, &voter_c);   // A → C (re-delegate)
+
+    let id = create_fee_proposal(&t);
+
+    t.contract.cast_vote(&t.voter_b, &id, &false);
+    let p = t.contract.get_proposal(&id);
+    assert_eq!(p.votes_against, 2_000); // B own only
+
+    t.contract.cast_vote(&voter_c, &id, &true);
+    let p = t.contract.get_proposal(&id);
+    assert_eq!(p.votes_for, 1_500); // C own 500 + A delegated 1_000
+}
+
+#[test]
+fn test_delegate_votes_emits_votes_delegated_event() {
+    let t = setup();
+    t.contract.delegate_votes(&t.voter_a, &t.voter_b);
+    let events = t.env.events().all().filter_by_contract(&t.contract.address);
+    assert!(!events.events().is_empty(), "VotesDelegated event should be emitted");
+}
+
+#[test]
+fn test_undelegate_votes_emits_votes_undelegated_event() {
+    let t = setup();
+    t.contract.delegate_votes(&t.voter_a, &t.voter_b);
+    t.contract.undelegate_votes(&t.voter_a);
+    let events = t.env.events().all().filter_by_contract(&t.contract.address);
+    assert!(events.events().len() >= 2, "VotesUndelegated event should be emitted");
+}
+
+#[test]
+fn test_zero_balance_voter_with_delegation_can_vote() {
+    let t = setup();
+    let receiver = Address::generate(&t.env);
+    // receiver has 0 own tokens
+
+    t.contract.delegate_votes(&t.voter_a, &receiver);
+
+    let id = create_fee_proposal(&t);
+    t.contract.cast_vote(&receiver, &id, &true);
+
+    let p = t.contract.get_proposal(&id);
+    assert_eq!(p.votes_for, 1_000); // only delegated weight from voter_a
 }

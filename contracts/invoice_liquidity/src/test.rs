@@ -179,9 +179,9 @@ fn test_submitter_reputation_snapshot_at_submission() {
 
     let invoice = t.contract.get_invoice(&id);
 
-    // Verify that the submitter_reputation_at_submission matches the freelancer's reputation at submission
+    // Verify that the submitter_reputation matches the freelancer's reputation at submission
     // For a new freelancer, this should be the default value of 50
-    assert_eq!(invoice.submitter_reputation_at_submission, 50);
+    assert_eq!(invoice.submitter_reputation, 50);
     assert_eq!(invoice.freelancer, t.freelancer);
 }
 
@@ -976,6 +976,7 @@ fn test_reputation_decay_inactive_score() {
         decay_rate_bps: 100, // 1% per period
         decay_period_ledgers: 1000,
         dispute_timeout_ledgers: 100,
+        price_oracle: None,
     };
     t.env.as_contract(&t.contract.address, || {
         crate::storage::set_config(&t.env, &config);
@@ -1012,6 +1013,7 @@ fn test_reputation_no_decay_when_inactive() {
         decay_rate_bps: 100,
         decay_period_ledgers: 10_000_000, // Very long period
         dispute_timeout_ledgers: 100,
+        price_oracle: None,
     };
     t.env.as_contract(&t.contract.address, || {
         crate::storage::set_config(&t.env, &config);
@@ -1045,6 +1047,7 @@ fn test_reputation_decay_activity_resets() {
         decay_rate_bps: 100,
         decay_period_ledgers: 1000,
         dispute_timeout_ledgers: 100,
+        price_oracle: None,
     };
 
     t.env.as_contract(&t.contract.address, || {
@@ -1088,6 +1091,7 @@ fn test_reputation_score_never_goes_below_zero() {
         decay_rate_bps: 5000, // Very aggressive decay: 50% per period
         decay_period_ledgers: 100,
         dispute_timeout_ledgers: 100,
+        price_oracle: None,
     };
     t.env.as_contract(&t.contract.address, || {
         crate::storage::set_config(&t.env, &config);

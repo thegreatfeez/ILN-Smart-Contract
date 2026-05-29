@@ -1,4 +1,5 @@
-use soroban_sdk::{contracttype, Address, BytesN, Env};
+use crate::storage::DataKey as StorageKey;
+use soroban_sdk::{contracttype, Address, BytesN, Env, Symbol, IntoVal};
 
 // ----------------------------------------------------------------
 // Status enum — tracks lifecycle of invoice
@@ -36,7 +37,8 @@ pub struct Invoice {
     pub funder: Option<Address>, // set when an LP funds the invoice (legacy for full funding)
     pub funded_at: Option<u32>,  // ledger timestamp when funding occurred
     pub amount_funded: i128,     // cumulative amount funded so far
-    pub submitter_reputation_at_submission: u32, // snapshot of freelancer's reputation at submission time
+    pub amount_paid: i128,       // cumulative amount paid by the payer
+    pub submitter_reputation: u32, // snapshot of freelancer's reputation at submission time
 }
 
 #[contracttype]
@@ -66,6 +68,23 @@ pub struct ReputationScore {
     pub last_activity_ledger: u32,
 }
 
+/// Detailed reputation profile for an address (Issue #26).
+///
+/// Foundational data model for the reputation system. The existing
+/// [`ReputationScore`] holds the lightweight decaying score used by the
+/// payer/LP scoring path; this profile records the richer counters that future
+/// reputation logic builds on. Unknown addresses resolve to a zeroed profile
+/// (see [`get_reputation`]) rather than panicking.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReputationProfile {
+    pub address: Address,
+    pub invoices_submitted: u32,
+    pub invoices_paid: u32,
+    pub invoices_defaulted: u32,
+    pub score: u32,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Default)]
 pub struct ContractStats {
@@ -75,6 +94,8 @@ pub struct ContractStats {
     pub total_volume_usdc: i128,
     pub total_volume_eurc: i128,
     pub total_volume_xlm: i128,
+    pub token_volumes: soroban_sdk::Vec<(Address, i128)>,
+    pub total_volume_usd_normalized: i128,
 }
 
 // ----------------------------------------------------------------
@@ -116,48 +137,6 @@ pub struct LpFundRequest {
     pub lp: Address,
     /// LP reputation score snapshotted at request time (used for ordering).
     pub score: u32,
-}
-
-// ----------------------------------------------------------------
-// Storage key (UPDATED for multi-token registry + new features)
-// ----------------------------------------------------------------
-
-#[contracttype]
-pub enum StorageKey {
-    Invoice(u64),        // Invoice by ID
-    InvoiceCount,        // auto-increment counter for IDs
-    Token,               // USDC token address
-    PayerScore(Address), // Payer reputation score
-    InvoiceFunders(u64), // List of funders for a partially funded invoice
-    ApprovedToken(Address),
-    TokenList,
-    Admin,
-    FeeRate,
-    MaxDiscountRate,
-    DistributionContract,
-    NextInvoiceId,
-    // ── Issue #36: appeal_default ──────────────────────────────────
-    Appeal(u64),               // AppealRecord keyed by invoice ID
-    PreDefaultPayerScore(u64), // payer score snapshot taken BEFORE claim_default penalty
-    // Dispute
-    Dispute(u64), // DisputeRecord keyed by invoice ID
-    // ── Issue #34: LP priority queue ──────────────────────────────
-    LpScore(Address),     // LP reputation score (distinct from PayerScore)
-    FundQueue(u64),       // Vec<LpFundRequest> — LPs that joined the queue for an invoice
-    QueueResolution(u64), // Address — the LP that won the priority queue
-    // Contract stats counters
-    TotalInvoices,   // Total invoices submitted
-    TotalFunded,     // Total invoices fully funded
-    TotalPaid,       // Total invoices paid
-    TotalVolumeUsdc, // Total volume in USDC
-    TotalVolumeEurc, // Total volume in EURC
-    TotalVolumeXlm,  // Total volume in XLM
-    // Submitter Index
-    SubmitterInvoices(Address), // Vec<u64> — Invoice IDs submitted by a specific address
-    // LP Index
-    LpInvoices(Address), // Vec<u64> — Invoice IDs funded by a specific LP
-    // Pause/unpause
-    Paused, // Boolean flag for contract pause state
 }
 
 // ----------------------------------------------------------------
@@ -242,12 +221,19 @@ pub fn invoice_exists(env: &Env, id: u64) -> bool {
     env.storage().persistent().has(&StorageKey::Invoice(id))
 }
 
-pub fn read_next_invoice_id(env: &Env) -> u64 {
-    env.storage()
-        .instance()
-        .get(&StorageKey::NextInvoiceId)
-        .unwrap_or(1)
+/// Load an invoice in a single storage read, returning `None` if it does not
+/// exist (Issue #71). Prefer this over the `invoice_exists` + `load_invoice`
+/// pair in hot paths, which reads the same key twice.
+pub fn try_load_invoice(env: &Env, id: u64) -> Option<Invoice> {
+    env.storage().persistent().get(&StorageKey::Invoice(id))
 }
+
+pub fn next_invoice_id(env: &Env) -> u64 {
+    let current: u64 = env
+        .storage()
+        .persistent()
+        .get(&StorageKey::InvoiceCount)
+        .unwrap_or(0);
 
 pub fn write_next_invoice_id(env: &Env, id: u64) {
     env.storage().instance().set(&StorageKey::NextInvoiceId, &id);
@@ -322,6 +308,54 @@ pub fn set_payer_score(env: &Env, payer: &Address, score: u32) {
     env.storage()
         .persistent()
         .set(&StorageKey::PayerScore(payer.clone()), &rep);
+}
+
+// ----------------------------------------------------------------
+// Issue #26: Reputation profile (detailed model)
+// ----------------------------------------------------------------
+
+/// Read an address's detailed reputation profile. Unknown addresses return a
+/// zeroed profile (no panic) so callers can branch on the counters directly.
+pub fn get_reputation(env: &Env, address: &Address) -> ReputationProfile {
+    env.storage()
+        .persistent()
+        .get(&StorageKey::Reputation(address.clone()))
+        .unwrap_or(ReputationProfile {
+            address: address.clone(),
+            invoices_submitted: 0,
+            invoices_paid: 0,
+            invoices_defaulted: 0,
+            score: 0,
+        })
+}
+
+/// Persist an address's reputation profile.
+pub fn set_reputation(env: &Env, profile: &ReputationProfile) {
+    let key = StorageKey::Reputation(profile.address.clone());
+    env.storage().persistent().set(&key, profile);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, 1_000_000, 2_000_000);
+}
+
+// ----------------------------------------------------------------
+// Issue #28: Minimum payer reputation threshold
+// ----------------------------------------------------------------
+
+/// Minimum payer reputation required to fund an invoice. Defaults to 0
+/// (allowing all payers) when unset.
+pub fn get_min_payer_reputation(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&StorageKey::MinPayerReputation)
+        .unwrap_or(0)
+}
+
+/// Set the minimum payer reputation threshold.
+pub fn set_min_payer_reputation(env: &Env, value: u32) {
+    env.storage()
+        .instance()
+        .set(&StorageKey::MinPayerReputation, &value);
 }
 
 // ----------------------------------------------------------------
@@ -439,6 +473,29 @@ pub fn save_queue_resolution(env: &Env, invoice_id: u64, approved_lp: &Address) 
 // ----------------------------------------------------------------
 
 pub fn get_contract_stats(env: &Env) -> ContractStats {
+    let token_list: soroban_sdk::Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&StorageKey::TokenList)
+        .unwrap_or(soroban_sdk::Vec::new(env));
+
+    let mut token_volumes = soroban_sdk::Vec::new(env);
+    let mut total_volume_usd_normalized: i128 = 0;
+
+    for token in token_list.iter() {
+        let volume: i128 = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::TokenVolume(token.clone()))
+            .unwrap_or(0);
+        token_volumes.push_back((token.clone(), volume));
+        if let Some(price_bps) = get_price_from_oracle(env, &token) {
+            total_volume_usd_normalized = total_volume_usd_normalized
+                .checked_add(volume.checked_mul(price_bps).unwrap_or(0) / 10_000)
+                .unwrap_or(total_volume_usd_normalized);
+        }
+    }
+
     ContractStats {
         total_invoices: env
             .storage()
@@ -470,6 +527,77 @@ pub fn get_contract_stats(env: &Env) -> ContractStats {
             .persistent()
             .get(&StorageKey::TotalVolumeXlm)
             .unwrap_or(0),
+        token_volumes,
+        total_volume_usd_normalized,
+    }
+}
+
+fn get_price_from_oracle(env: &Env, token: &Address) -> Option<i128> {
+    let config = crate::storage::get_config(env)?;
+    let oracle = config.price_oracle?;
+    let args = soroban_sdk::vec![env, token.clone().into_val(env)];
+    Some(env.invoke_contract::<i128>(&oracle, &Symbol::new(env, "get_price"), args))
+}
+
+pub fn add_volume(env: &Env, token: &Address, amount: i128) {
+    // Track per-token volume in a mutable map.
+    let current_per_token: i128 = env
+        .storage()
+        .persistent()
+        .get(&StorageKey::TokenVolume(token.clone()))
+        .unwrap_or(0);
+    env.storage()
+        .persistent()
+        .set(&StorageKey::TokenVolume(token.clone()), &(current_per_token + amount));
+
+    // Preserve legacy aggregate token counters for compatibility.
+    let token_list: soroban_sdk::Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&StorageKey::TokenList)
+        .unwrap_or(soroban_sdk::Vec::new(env));
+
+    if token_list.len() > 0 {
+        if let Some(usdc_addr) = token_list.get(0) {
+            if token == &usdc_addr {
+                let current: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&StorageKey::TotalVolumeUsdc)
+                    .unwrap_or(0);
+                env.storage()
+                    .persistent()
+                    .set(&StorageKey::TotalVolumeUsdc, &(current + amount));
+            }
+        }
+    }
+    if token_list.len() > 1 {
+        if let Some(eurc_addr) = token_list.get(1) {
+            if token == &eurc_addr {
+                let current: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&StorageKey::TotalVolumeEurc)
+                    .unwrap_or(0);
+                env.storage()
+                    .persistent()
+                    .set(&StorageKey::TotalVolumeEurc, &(current + amount));
+            }
+        }
+    }
+    if token_list.len() > 2 {
+        if let Some(xlm_addr) = token_list.get(2) {
+            if token == &xlm_addr {
+                let current: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&StorageKey::TotalVolumeXlm)
+                    .unwrap_or(0);
+                env.storage()
+                    .persistent()
+                    .set(&StorageKey::TotalVolumeXlm, &(current + amount));
+            }
+        }
     }
 }
 
@@ -504,44 +632,6 @@ pub fn increment_total_paid(env: &Env) {
     env.storage()
         .persistent()
         .set(&StorageKey::TotalPaid, &(current + 1));
-}
-
-pub fn add_volume(
-    env: &Env,
-    token: &Address,
-    amount: i128,
-    usdc_addr: &Address,
-    eurc_addr: &Address,
-    xlm_addr: &Address,
-) {
-    if token == usdc_addr {
-        let current: i128 = env
-            .storage()
-            .persistent()
-            .get(&StorageKey::TotalVolumeUsdc)
-            .unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&StorageKey::TotalVolumeUsdc, &(current + amount));
-    } else if token == eurc_addr {
-        let current: i128 = env
-            .storage()
-            .persistent()
-            .get(&StorageKey::TotalVolumeEurc)
-            .unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&StorageKey::TotalVolumeEurc, &(current + amount));
-    } else if token == xlm_addr {
-        let current: i128 = env
-            .storage()
-            .persistent()
-            .get(&StorageKey::TotalVolumeXlm)
-            .unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&StorageKey::TotalVolumeXlm, &(current + amount));
-    }
 }
 
 pub fn is_paused(env: &Env) -> bool {
