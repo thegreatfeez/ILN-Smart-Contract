@@ -2,6 +2,22 @@ use soroban_sdk::{contractevent, Address, BytesN, Symbol};
 
 use crate::invoice::InvoiceStatus;
 
+/// Emitted when governance adds a token to the funding allowlist (Issue #19).
+#[contractevent(topics = ["token_added"])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct TokenAdded {
+    #[topic]
+    pub token: Address,
+}
+
+/// Emitted when governance removes a token from the funding allowlist (Issue #19).
+#[contractevent(topics = ["token_removed"])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct TokenRemoved {
+    #[topic]
+    pub token: Address,
+}
+
 #[contractevent(topics = ["submitted"])]
 #[derive(Clone, Debug, PartialEq)]
 pub struct InvoiceSubmitted {

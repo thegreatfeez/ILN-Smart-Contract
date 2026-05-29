@@ -68,6 +68,23 @@ pub struct ReputationScore {
     pub last_activity_ledger: u32,
 }
 
+/// Detailed reputation profile for an address (Issue #26).
+///
+/// Foundational data model for the reputation system. The existing
+/// [`ReputationScore`] holds the lightweight decaying score used by the
+/// payer/LP scoring path; this profile records the richer counters that future
+/// reputation logic builds on. Unknown addresses resolve to a zeroed profile
+/// (see [`get_reputation`]) rather than panicking.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReputationProfile {
+    pub address: Address,
+    pub invoices_submitted: u32,
+    pub invoices_paid: u32,
+    pub invoices_defaulted: u32,
+    pub score: u32,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Default)]
 pub struct ContractStats {
@@ -204,6 +221,13 @@ pub fn invoice_exists(env: &Env, id: u64) -> bool {
     env.storage().persistent().has(&StorageKey::Invoice(id))
 }
 
+/// Load an invoice in a single storage read, returning `None` if it does not
+/// exist (Issue #71). Prefer this over the `invoice_exists` + `load_invoice`
+/// pair in hot paths, which reads the same key twice.
+pub fn try_load_invoice(env: &Env, id: u64) -> Option<Invoice> {
+    env.storage().persistent().get(&StorageKey::Invoice(id))
+}
+
 pub fn next_invoice_id(env: &Env) -> u64 {
     let current: u64 = env
         .storage()
@@ -281,6 +305,54 @@ pub fn set_payer_score(env: &Env, payer: &Address, score: u32) {
     env.storage()
         .persistent()
         .set(&StorageKey::PayerScore(payer.clone()), &rep);
+}
+
+// ----------------------------------------------------------------
+// Issue #26: Reputation profile (detailed model)
+// ----------------------------------------------------------------
+
+/// Read an address's detailed reputation profile. Unknown addresses return a
+/// zeroed profile (no panic) so callers can branch on the counters directly.
+pub fn get_reputation(env: &Env, address: &Address) -> ReputationProfile {
+    env.storage()
+        .persistent()
+        .get(&StorageKey::Reputation(address.clone()))
+        .unwrap_or(ReputationProfile {
+            address: address.clone(),
+            invoices_submitted: 0,
+            invoices_paid: 0,
+            invoices_defaulted: 0,
+            score: 0,
+        })
+}
+
+/// Persist an address's reputation profile.
+pub fn set_reputation(env: &Env, profile: &ReputationProfile) {
+    let key = StorageKey::Reputation(profile.address.clone());
+    env.storage().persistent().set(&key, profile);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, 1_000_000, 2_000_000);
+}
+
+// ----------------------------------------------------------------
+// Issue #28: Minimum payer reputation threshold
+// ----------------------------------------------------------------
+
+/// Minimum payer reputation required to fund an invoice. Defaults to 0
+/// (allowing all payers) when unset.
+pub fn get_min_payer_reputation(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&StorageKey::MinPayerReputation)
+        .unwrap_or(0)
+}
+
+/// Set the minimum payer reputation threshold.
+pub fn set_min_payer_reputation(env: &Env, value: u32) {
+    env.storage()
+        .instance()
+        .set(&StorageKey::MinPayerReputation, &value);
 }
 
 // ----------------------------------------------------------------

@@ -13,6 +13,8 @@ pub enum DataKey {
     MaxDiscountRate,
     DistributionContract,
     Paused,
+    /// Minimum payer reputation required to fund an invoice (Issue #28). Default 0.
+    MinPayerReputation,
 
     // Persistent Storage
     Invoice(u64),
@@ -22,6 +24,8 @@ pub enum DataKey {
     InvoiceFunders(u64),
     ApprovedToken(Address),
     TokenList,
+    /// Detailed reputation profile per address (Issue #26).
+    Reputation(Address),
     Appeal(u64),
     PreDefaultPayerScore(u64),
     LpScore(Address),

@@ -15,7 +15,8 @@ mod tests_regression;
 mod tests_xlm_support;
 
 pub use crate::invoice::{
-    AppealRecord, Invoice, InvoiceParams, InvoiceStatus, LpFundRequest, ReputationScore,
+    AppealRecord, Invoice, InvoiceParams, InvoiceStatus, LpFundRequest, ReputationProfile,
+    ReputationScore,
 };
 pub use crate::storage::DataKey;
 pub use config::{Config, ConfigError};
@@ -30,17 +31,19 @@ use events::{
     AdminChanged, AppealResolved, ContractPaused, ContractUnpaused, ContractUpgraded,
     DefaultAppealed, DisputeResolved, FundQueueResolved, FundRequested, InvoiceCancelled,
     InvoiceDefaulted, InvoiceDisputed, InvoiceFunded, InvoicePaid, InvoicePartiallyPaid,
-    InvoiceSubmitted, InvoiceTransferred, InvoiceUpdated, ParameterUpdated,
+    InvoiceSubmitted, InvoiceTransferred, InvoiceUpdated, ParameterUpdated, TokenAdded,
+    TokenRemoved,
 };
 use invoice::{
     add_invoice_to_lp, add_invoice_to_submitter, add_volume, get_appeal, get_contract_stats,
     get_dispute, get_fund_queue, get_invoice_funders, get_lp_invoices, get_lp_score,
-    get_payer_score, get_pre_default_payer_score, get_queue_resolution, get_submitter_invoices,
-    increment_total_funded, increment_total_invoices, increment_total_paid, invoice_exists,
-    is_paused, load_invoice, next_invoice_id, remove_invoice_from_submitter, save_appeal,
-    save_dispute, save_fund_queue, save_invoice, save_invoice_funders,
-    save_pre_default_payer_score, save_queue_resolution, set_lp_score, set_paused, set_payer_score,
-    ContractStats, DisputeRecord, StorageKey,
+    get_min_payer_reputation, get_payer_score, get_pre_default_payer_score, get_queue_resolution,
+    get_reputation, get_submitter_invoices, increment_total_funded, increment_total_invoices,
+    increment_total_paid, invoice_exists, is_paused, load_invoice, next_invoice_id,
+    remove_invoice_from_submitter, save_appeal, save_dispute, save_fund_queue, save_invoice,
+    save_invoice_funders, save_pre_default_payer_score, save_queue_resolution, set_lp_score,
+    set_min_payer_reputation, set_paused, set_payer_score, try_load_invoice, ContractStats,
+    DisputeRecord, StorageKey,
 };
 // 30-day window in seconds for a payer to file an appeal after a default.
 const APPEAL_WINDOW_SECONDS: u64 = 30 * 24 * 60 * 60;
@@ -225,11 +228,13 @@ impl InvoiceLiquidityContract {
             .get(&crate::storage::DataKey::TokenList)
             .unwrap_or(Vec::new(&env));
         if !list.contains(&token) {
-            list.push_back(token);
+            list.push_back(token.clone());
             env.storage()
                 .persistent()
                 .set(&crate::storage::DataKey::TokenList, &list);
         }
+
+        env.events().publish_event(&TokenAdded { token });
         Ok(())
     }
 
@@ -240,6 +245,24 @@ impl InvoiceLiquidityContract {
         env.storage()
             .persistent()
             .set(&StorageKey::ApprovedToken(token.clone()), &false);
+
+        // Keep the allowlist Vec in sync with the ApprovedToken flag.
+        let list: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&crate::storage::DataKey::TokenList)
+            .unwrap_or(Vec::new(&env));
+        let mut pruned: Vec<Address> = Vec::new(&env);
+        for t in list.iter() {
+            if t != token {
+                pruned.push_back(t);
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&crate::storage::DataKey::TokenList, &pruned);
+
+        env.events().publish_event(&TokenRemoved { token });
         Ok(())
     }
 
@@ -713,9 +736,10 @@ impl InvoiceLiquidityContract {
 
         require_lp(&env, &funder)?;
 
-        if !invoice_exists(&env, invoice_id) {
-            return Err(ContractError::InvoiceNotFound);
-        }
+        // Issue #71: load the invoice once instead of `invoice_exists` + `load_invoice`
+        // (which read the same persistent key twice on the hottest path).
+        let mut invoice =
+            try_load_invoice(&env, invoice_id).ok_or(ContractError::InvoiceNotFound)?;
 
         // ── Issue #34: priority queue check ──────────────────────
         // If a queue has been resolved, only the approved LP may fund.
@@ -725,7 +749,19 @@ impl InvoiceLiquidityContract {
             }
         }
 
-        let mut invoice = load_invoice(&env, invoice_id);
+        // Issue #19: the invoice token must still be on the governance allowlist.
+        if !is_approved_token(&env, &invoice.token) {
+            return Err(ContractError::Unauthorized);
+        }
+
+        // Issue #28: reject funding when the payer's reputation is below the
+        // configured minimum threshold (default 0 allows everyone).
+        let min_payer_reputation = get_min_payer_reputation(&env);
+        if min_payer_reputation > 0
+            && get_payer_score(&env, &invoice.payer) < min_payer_reputation
+        {
+            return Err(ContractError::PayerReputationTooLow);
+        }
 
         if invoice.status == InvoiceStatus::Pending
             && env.ledger().timestamp() >= u64::from(invoice.due_date)
@@ -1013,11 +1049,9 @@ impl InvoiceLiquidityContract {
             return Err(ContractError::InvalidAmount);
         }
 
-        if !invoice_exists(&env, invoice_id) {
-            return Err(ContractError::InvoiceNotFound);
-        }
-
-        let mut invoice = load_invoice(&env, invoice_id);
+        // Issue #71: single load instead of `invoice_exists` + `load_invoice`.
+        let mut invoice =
+            try_load_invoice(&env, invoice_id).ok_or(ContractError::InvoiceNotFound)?;
 
         require_payer_by_id(&env, invoice_id)?;
 
@@ -1635,6 +1669,41 @@ impl InvoiceLiquidityContract {
     }
 
     // ----------------------------------------------------------------
+    // get_reputation (Issue #26)
+    // ----------------------------------------------------------------
+    /// Read an address's detailed reputation profile. Unknown addresses return
+    /// a zeroed profile rather than panicking.
+    /// Access: Anyone
+    pub fn get_reputation(env: Env, address: Address) -> ReputationProfile {
+        get_reputation(&env, &address)
+    }
+
+    // ----------------------------------------------------------------
+    // min_payer_reputation config (Issue #28)
+    // ----------------------------------------------------------------
+    /// Current minimum payer reputation required to fund an invoice (0 = off).
+    /// Access: Anyone
+    pub fn min_payer_reputation(env: Env) -> u32 {
+        get_min_payer_reputation(&env)
+    }
+
+    /// Update the minimum payer reputation threshold.
+    /// Access: Admin only
+    pub fn set_min_payer_reputation(env: Env, value: u32) -> Result<(), ContractError> {
+        require_admin(&env)?;
+        let updated_by = get_admin(&env).ok_or(ContractError::Unauthorized)?;
+        let old_value = get_min_payer_reputation(&env);
+        set_min_payer_reputation(&env, value);
+        env.events().publish_event(&ParameterUpdated {
+            param_name: Symbol::new(&env, "min_payer_reputation"),
+            old_value: old_value as i128,
+            new_value: value as i128,
+            updated_by,
+        });
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------
     // suggested_discount_rate
     // ----------------------------------------------------------------
     /// Access: Anyone
@@ -1815,6 +1884,8 @@ fn notify_distribution_settlement(
 mod test;
 #[cfg(test)]
 mod tests_access_control;
+#[cfg(test)]
+mod tests_governance_features;
 mod tests_appeal;
 mod tests_arithmetic;
 mod tests_auth;
